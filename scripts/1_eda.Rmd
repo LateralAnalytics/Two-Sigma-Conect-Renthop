@@ -1,0 +1,561 @@
+---
+title: 'Two Sigma Connect: Rental Listing Inquiries - EDA'
+author: "Lateral Analytics"
+output:
+  html_document: default
+  html_notebook: default
+---
+# Exploratory Data Analysis of Renthop data.
+This is the initial exploratory section of the project.
+It also creates some simple features.
+
+## Remove all objects
+```{r}
+rm(list = ls())
+```
+
+
+## Load libraries
+```{r message = FALSE, warning = FALSE}
+# Clear any previously loaded packages
+pkgs_1 = names(sessionInfo()$otherPkgs)
+pkgs_2 = paste('package:', pkgs_1, sep = "")
+invisible(if (length(pkgs_1) > 0){
+  lapply(pkgs_2, detach, character.only = TRUE, unload = TRUE)
+})
+
+library("tidyverse")
+library("rjson")
+library("rmarkdown")
+library("lubridate")
+library("ggplot2")
+library("maps")
+library("mapproj")
+library("RColorBrewer")
+library("wordcloud")
+```
+## Load data
+Save as an RDS file, so that we don't need to constantly reload this data for other scripts.
+```{r}
+
+data_train <- rjson::fromJSON(file= "../data/train.json" )
+data_test <- rjson::fromJSON(file= "../data/test.json" )
+
+# unlist every variable except `photos` and `features` and convert to tibble
+vars_train <- setdiff(names(data_train), c("photos", "features"))
+vars_test <- setdiff(names(data_test), c("photos","features"))
+
+data_train <- map_at(data_train, vars_train, unlist) %>% tibble::as_tibble(.) %>%
+  mutate(section = 'train')
+
+data_test <- map_at(data_test, vars_test, unlist) %>% tibble::as_tibble(.) %>%
+  mutate(interest_level = 'none',
+         section = 'test')
+
+data <- rbind(data_train,data_test)
+
+saveRDS(data, file = "../data/objects/data.rds")
+
+```
+
+## View the data.
+```{r}
+data[1:3,]
+
+```
+There is more than one feature or photo for most of the listings.
+
+## Check for missing values
+```{r}
+
+## There aren't any missing values in both train and test.
+
+print(data_na <- data %>% summarise_each(funs(sum(is.na(.)))))
+
+
+```
+
+
+
+## Exploration / Simple Features
+### Check Header
+```{r}
+listings <- data %>% 
+  select(-features, - photos)
+head(listings)
+```
+
+### Check count of listings in different interest levels
+```{r}
+listings %>% filter(section == "train") %>% 
+  group_by(interest_level) %>% 
+  count()
+```
+
+Renthop didn't specify what methodology they used to label each listing among high, medium, and low.  Yet, they didn't do so equally. There are many more low than medium, and more medium than high. This dataset is unbalanced.
+
+
+###Create Features
+```{r}
+#Counts how many photos each listing has
+photos_count <- map_int(data[['photos']], function(x) length(unlist(x)))
+photos_count <- tibble::as_tibble(photos_count)
+listings$photos_count <- photos_count$value
+listings %>% rename(value = photos_count)
+
+feature_count <- map_int(data[['features']], function(x) length(unlist(x)))
+feature_count <- tibble::as_tibble(feature_count)
+listings$feature_count <- feature_count$value
+listings %>% rename(value = feature_count)
+
+#Room Count
+listings <- mutate(listings,
+                   dates_formatted = ymd_hms(listings$created),
+                   total_rooms = bedrooms + bathrooms + 1,
+                   beds_bath_ratio = ifelse(bathrooms > 0, bedrooms / bathrooms, NA),
+                   # zero bedrooms and bathrooms must be an efficiency apartment
+                   price_room_ratio = ifelse(total_rooms >0 , price / total_rooms, price),
+                   price_bath_ratio = ifelse( bathrooms > 0, price / bathrooms, NA),
+                   price_photos_ratio = ifelse(photos_count > 0, price / photos_count, NA),
+                   price_feature_ratio = ifelse(feature_count > 0, price / feature_count, NA),
+                   created_ymd = ymd(as.Date(created)),
+                   created_dow = wday(created),
+                   created_h = hour(created)
+                   )
+
+```
+  
+### Analyze the intial features to better understand the data
+  
+  
+```{r}
+# Make interest_level a factor so that later output will display in low, medium, high order
+listings <- listings %>%
+  mutate(interest_level = factor(interest_level, levels = c("low", "medium", "high"))
+         )
+  
+group_by(listings, interest_level) %>%
+  filter(section == 'train') %>%
+    summarize(
+              count = n(),
+              mean_price = mean(price),
+              min_price = min(price),
+              max_price = max(price),
+              stdev_price = sd(price), 
+              q_25 = quantile(price, .25), 
+              median_price = median(price), 
+              q_75 = quantile(price, .75), 
+              q_99 = quantile(price, .99),
+              median_bedrooms = median(bedrooms),
+              median_total_rooms = median(total_rooms),
+              q_99_total_rooms = quantile(total_rooms, .99),
+              median_photo_count = median(photos_count),
+              median_features = median(feature_count)
+             )
+```
+
+
+Unsurprisingly, listings with lower prices and more rooms receive more interest.  Note the maximum price for a low interest apartment is $4,490,000.  Even for N.Y.C. this is hard to believe.
+
+Let's take a closer look at the price distribution with a boxplot.
+
+### Simple Boxplot
+```{r}
+price_box <- listings %>%
+  filter(section == 'train')
+
+ggplot(price_box, aes(interest_level, price)) + geom_boxplot(varwidth = TRUE)
+
+```
+As expected a few extreme outliers distort the results. We need to limit the y axis range in ggplot2.
+
+```{r}
+
+ggplot(price_box, aes(interest_level, price)) + geom_boxplot(varwidth = TRUE) + coord_cartesian(ylim = c(0, 20000)) + ggtitle("Interest Level Spread")
+
+
+```
+
+We can see the those listings with low interest are higher in general, but also have a large number of expensive outliers, which are also reasonable for NYC. The high interest listings have a lower median price, and a narrower distribution.
+
+### Density Plot
+Let's look at price distribution with a density plot.
+
+```{r}
+#Price density plot
+listings %>% filter(price <= quantile(listings$price, 0.95), section == 'train') %>%
+ggplot(aes(x = price, fill = interest_level)) +
+    geom_histogram(aes(y = ..density..), binwidth= 200, position = "identity", color = "red", size = .04) +
+    facet_grid(.~interest_level) +
+    ggtitle("Price Probability Density")
+
+```
+
+We can see from this plot that the listings with higher interest are much more concentrated around low price. Also, like a lot of transaction data it is not normal.  It's clearly skewed to the right. This happens because on the lower side the price distribution is bound by zero, yet there is a lot of room to ask for high prices. No one would pay you to live in their apartment.
+
+### Proportion of Bedroom in Interest Level
+```{r}
+#summary table for bar chart  
+filter(listings, section == 'train') %>%
+group_by(bedrooms, interest_level) %>%
+  summarize(room_count = n()) %>% 
+  ungroup() %>% 
+  group_by(interest_level) %>% 
+  mutate(total_bedrooms = sum(room_count)) %>%
+  mutate(p = room_count/total_bedrooms) %>%
+  ggplot(aes(bedrooms, p)) +
+  geom_bar(aes(fill = interest_level), stat = "identity")  +
+  facet_grid(.~interest_level) +
+  ylab("proportion of bedrooms in interest level")
+
+
+```
+
+Two bedrooms are the highest proportion of all of the interest levels.
+
+### Prices by Number of Bedrooms
+```{r}
+
+filter(listings, price <= quantile(listings$price, 0.999), section == 'train') %>%
+ggplot(aes(x = bedrooms, y = price)) +
+  geom_jitter(aes(color = interest_level), alpha = 0.02) +
+  facet_grid(.~interest_level)
+
+```
+
+The price of apartments with more bedrooms increases.  It increases faster for low interest apartments. Interest in an apartment decreases quickly after the price gets to about $8,000 per month.
+
+### Price to Room Ratio
+```{r}
+filter(listings, price <= quantile(listings$price, 0.95), section == 'train') %>%
+ggplot(aes(x = total_rooms, y = price_room_ratio)) +
+  geom_jitter(aes(color = interest_level), alpha = 0.02) +
+  facet_grid(.~interest_level)
+```
+
+### Feature Count Density
+```{r}
+
+#features by interest
+filter(listings, price <= quantile(listings$price, 1.00), section == 'train') %>%
+ggplot(aes(x = feature_count)) +
+  geom_histogram(aes(y = ..density.., fill = interest_level), 
+                 bins = 40, position = "identity", color = "white", size = 0.07) +
+  facet_grid(.~interest_level) +
+  guides(color = FALSE)
+```
+
+The density of feature count doesn't seem to vary greatly by interest level. Most listings have about 5 features. Surprisingly, the high interest level listings have the highest proportion of zero listed feature listings. They must have something obvious to offer, such that the lister doens't think there is a need to list features.
+
+### Price by Number of Features
+```{r}
+#price by number of features
+filter(listings, price <= quantile(listings$price, 0.99), section == 'train') %>%
+ggplot(aes(x = feature_count, y = price)) +
+  geom_jitter(aes(color = interest_level), alpha = .10) +
+  facet_grid(.~interest_level) +
+  ggtitle("Variation of Price at different feature count and interest levels") +
+geom_smooth()
+
+
+
+```
+
+Excluding outliers there is a clear positive relationship between feature_count and price.  If you want more money then you need to explain why your apartment is worth it. There are also many high priced apartments with a low interest level and a small number of features listed.  That makes sense. Work harder:)
+
+
+### Photo Count Density
+```{r}
+
+#photos by interest
+filter(listings, price <= quantile(listings$price, 1.00), section == 'train') %>%
+ggplot(aes(x = photos_count)) +
+  geom_histogram(aes(y = ..density.., fill = interest_level), 
+                 bins = 40, position = "identity", color = "white", size = 0.07) +
+  facet_grid(.~interest_level) +
+  guides(color = FALSE)
+```
+
+The density of photo count doesn't seem to vary greatly by interest level. Most listings have about 5 photos
+
+### Price by Number of Photos
+```{r}
+#price by number of photos
+filter(listings, price <= quantile(listings$price, 0.99), section == 'train') %>%
+ggplot(aes(x = photos_count, y = price)) +
+  geom_jitter(aes(color = interest_level), alpha = .10) +
+  facet_grid(.~interest_level) +
+  ggtitle("Variation of Price at different photos count and interest levels") +
+geom_smooth()
+
+
+
+```
+For the low interest listings there is a clear positive relationship between the number of phots in the listing and price. The people who create the listing must realize they need to work harder. The relationship is less clear for the medium and low interest listings, although it's still there. It is clear however, that the first 10 photos are strongly associated with a larger price. It would be interesting to know how long each listing was on the market. Then we could have a better understanding if the prices asked were reasonable market prices or not. Are the listers able to ask a higher price because they spent more time uploading photos, or is the price already higher and they need to show why that is?
+
+
+### Listings Creation Date
+```{r}
+listings %>% filter(section == 'train') %>%
+ggplot(mapping = aes(created_ymd)) + 
+  geom_bar(aes(fill = interest_level)) + 
+  facet_grid(~interest_level) +
+  ylab("count of listings")
+
+```
+```{r}
+dates_train <- listings %>% filter(section == 'train') %>%
+  select(created_ymd) %>%
+  unique() %>%
+  arrange(created_ymd)
+
+dates_test <- listings %>% filter(section == 'test') %>%
+  select(created_ymd) %>%
+  unique() %>%
+  arrange(created_ymd)
+
+identical(dates_train,dates_test)
+
+```
+The date range of the training and testing data are exactly the same. It would be nice to have an out of time sample to test models on. Testing them on a test set from the same time span may lead to overoptimistic results. Maybe Renthop had reasons for this.
+
+The time frame of the data is from April 1st to June 29th. There doesn't seem to be a long term trend, but there might be some weekly or hourly trends.  Let's look and find out.
+
+### Listing DOW Trend
+```{r}
+listings %>% filter(section == 'train') %>%
+ggplot(mapping = aes(created_dow)) + 
+  geom_bar(aes(fill = interest_level)) + 
+  facet_grid(~interest_level) +
+  ylab("count of listings") + 
+  ggtitle("Distribution of Listings by Day of Week")
+```
+Sunday is the first day of the week.  We can see that most listings are entered on Wednesday. This is the middle of the workweek for agents.
+
+### Listing Hourly Trend
+```{r}
+listings %>% filter(section == 'train') %>%
+ggplot(mapping = aes(created_h)) + 
+  geom_bar(aes(fill = interest_level)) + 
+  facet_grid(~interest_level) +
+  ylab("count of listings") + 
+  ggtitle("Distribution of Listings by Hour of Day")
+
+```
+Most listings were created between midnight and 6:00 in the morning. Since most people sleep at that time, there must be a timezone issue.
+```{r}
+tz(listings$created)
+```
+
+So, this data appears to be set to UTC, yet since it's just a character and not set to any sort of date time object, I would guess that UTC is just the default for the tz function.  We know this is for NYC, and most of the listings were probably created by people in NYC. This being the case something funny is going on.  I don't believe most people would create a listing so early in the morning.
+
+### View Spatial Distribution
+```{r}
+listings %>% filter(section == 'train') %>%
+ggplot(aes(x=longitude, y=latitude)) +
+geom_point(aes(color = interest_level), size = 0.8, alpha = 0.3) + 
+borders("county") +
+coord_map(xlim = c(-74.20, -73.70), ylim = c(40.50, 40.95)) + 
+ggtitle("Interest Level by Lat/Long")
+
+```
+
+This is a quick and dirty way to get a map displayed on ggplot2. I'm not too concerned about coordinates that seem to be in the water.
+
+Initial indications show that the outlying areas (outside of Manhattan) have a higher occurrence of high interest listings. They are probably cheaper. Let's take a closer look at Manhattan to see if we can see anything that may be obscurred at a distance.
+
+```{r}
+listings %>% filter(section == 'train') %>%
+ggplot(aes(x=longitude, y=latitude)) +
+geom_point(aes(color = interest_level), size = 0.8, alpha = 0.3) + 
+borders("county") +
+coord_map(xlim = c(-74.05, -73.9 ), ylim = c(40.70, 40.85)) + 
+ggtitle("Interest Level (Manhattan) by Lat/Long")
+```
+
+There aren't any discernible patterns here either. There should be blank spots for central park as well as bodies of water. This lat/long data has some errors. We may need to constrain it to some extent so that it will always be a reasonable value.
+
+
+
+### Popular Property Managers
+It could be that certain property managers are very popular. If so, the property manager ID could be an important feature.
+
+```{r}
+manager_count <- listings %>% filter(section == 'train') %>%
+  group_by(manager_id) %>%
+  summarise(n_manager = n()) %>%
+  arrange(manager_id)
+
+manager_interest_count <- listings %>% filter(section == 'train') %>%
+  group_by(manager_id, interest_level) %>%
+  summarise(n_manager_interest = n()) %>%
+  arrange(manager_id)
+
+inner_join(manager_count, manager_interest_count) %>%
+  mutate(interest_pct = n_manager_interest / n_manager) %>%
+  ggplot(aes(x = n_manager)) +
+  geom_histogram(aes(y = ..density.., fill = interest_level), binwidth = 5) + 
+  facet_grid(.~interest_level) + 
+  coord_cartesian(xlim=c(0, 100)) + 
+  ggtitle("Top Property Managers")
+```
+
+Ther are are many managers with 0 to 10 listings.  Let's filter on those with more than 10, and consider those potential popular managers. 
+
+```{r}
+(manager_interest_pct <- inner_join(manager_count, manager_interest_count) %>%
+  mutate(interest_pct = n_manager_interest / n_manager) %>%
+  filter(interest_level == "high", n_manager >= 10, interest_pct > 0.5) %>%
+  arrange(-interest_pct))
+
+
+```
+
+There are 12 property managers who have at least 10 listings at least 50% of which have a high interest level. These managers have done something right. A feature should be created which calls  them out.
+
+### Popular buildings
+```{r}
+building_count <- listings %>% filter(section == 'train') %>%
+  group_by(building_id) %>%
+  summarise(n_building = n()) %>%
+  arrange(building_id)
+
+building_interest_count <- listings %>% filter(section == 'train') %>%
+  group_by(building_id, interest_level) %>%
+  summarise(n_building_interest = n()) %>%
+  arrange(building_id)
+
+inner_join(building_count, building_interest_count) %>%
+  mutate(interest_pct = n_building_interest / n_building) %>%
+  ggplot(aes(x = n_building)) +
+  geom_histogram(aes(y = ..density.., fill = interest_level), binwidth = 5) + 
+  facet_grid(.~interest_level) + 
+  coord_cartesian(xlim=c(0, 100)) + 
+  ggtitle("Top Buildings")
+```
+
+After about 10 listings the numbers decrease. Let's look at those building with at least 10 listings and a high interest level above 50%.
+
+```{r}
+(building_interest_pct <- inner_join(building_count, building_interest_count) %>%
+  mutate(interest_pct = n_building_interest / n_building) %>%
+  filter(interest_level == "high", n_building >= 10, interest_pct > 0.5) %>%
+  arrange(-interest_pct))
+```
+
+Just 9 buildings made the cut.  Let's see where they are.
+
+```{r}
+building_map_data <- inner_join(building_interest_pct, listings)
+
+
+building_map_data %>%
+ggplot(aes(x=longitude, y=latitude)) +
+geom_point(aes(color = interest_level), size = 0.8, alpha = 0.3) + 
+borders("county") +
+coord_map(xlim = c(-74.10, -73.80), ylim = c(40.60, 40.90)) + 
+ggtitle("Popular Buildings - Interest Level by Lat/Long")
+```
+
+Most of the popular buildings are in lower Manhattan. A feature could be created which specifies the distance of a given building from this area.
+
+### Most Common Listed Features
+```{r}
+features_low <- data %>% filter(interest_level == "low") %>% 
+  select(features) %>% 
+  unlist() %>% 
+  as_tibble() %>%
+  group_by(value) %>%
+  summarize(feature_count = n()) %>%
+  arrange(desc(feature_count))
+
+wordcloud(features_low$value, features_low$feature_count, scale=c(3,.2), min.freq = 30)
+```
+
+
+```{r}
+features_medium <- data %>% filter(interest_level == "medium") %>% 
+  select(features) %>% 
+  unlist() %>% 
+  as_tibble() %>%
+  group_by(value) %>%
+  summarize(feature_count = n()) %>%
+  arrange(desc(feature_count))
+
+wordcloud(features_medium$value, features_medium$feature_count, scale=c(3,.2), min.freq = 30)
+```
+
+```{r}
+
+features_high <- data %>% filter(interest_level == "high") %>% 
+  select(features) %>% 
+  unlist() %>% 
+  as_tibble() %>%
+  group_by(value) %>%
+  summarize(feature_count = n()) %>%
+  arrange(desc(feature_count))
+
+wordcloud(features_high$value, features_high$feature_count, scale=c(3,.2), min.freq = 30)
+
+```
+
+The results all seem fairly similar.  Hardwood floors are popular. So are pets. "Doorman" isn't mentioned as much in the high interest listings. That probably has a relationship to price.
+
+
+### Find and replace obviously invalid outliers
+There were a lot of outliers for price. Although, they were much higher than most, many of them were still possible given that most of the listings were in Manhattan. The high prices will effectively be taken care of later by log transforms. There may be other outliers, which simply can't be true. Let's look for them and replace them with reasonable values.
+
+```{r}
+listings %>% 
+  group_by(price) %>%
+  summarize(listings_count = n()) %>%
+  ggplot(aes(price, listings_count)) +
+  geom_point() + 
+  coord_cartesian(xlim = c(0, 50000))
+```
+
+Nothing obvious stands out on price. I wouldn't pay some of these prices, but there may be some people.
+
+What about Latitude and longitude?
+This is supposed to be for NYC. We know from the "View Spatial Distribution" section that the longitude and latitude should be approximately within this box; longitude = c(-74.20, -73.70), latitude = c(40.50, 40.95). So, anything outside this box doesn't make sense.
+
+```{r}
+unlikely_geo <- listings %>% filter(longitude < -74.20 | longitude > -73.70 | latitude < 40.50 | latitude > 40.95)
+
+ggplot(unlikely_geo, aes(longitude, latitude)) + 
+  geom_point() + 
+  geom_rect(xmin = -74.20 , xmax = -73.70,   ymin = 40.50, ymax = 40.95,   fill = "red")
+
+```
+
+Upon inspection, most of the coordinates of these listings are reasonable. They aren't in NYC itself, but are in the greater metropolitan area. The yellow box above shows the target area. Let's only filter out only those which are clearly wrong.
+
+
+```{r}
+long_range <- abs(abs(-74.20) - abs(-73.70))
+lat_range <- abs(abs(40.50) - abs(40.95))
+
+very_unlikely_geo <- listings %>% filter(longitude < -74.20 - (10 * long_range) | longitude > -73.70 + (10 * long_range) | latitude < 40.50 - (10 * lat_range) | latitude > 40.95 + (10 * lat_range))
+
+ggplot(very_unlikely_geo, aes(longitude, latitude)) + 
+  geom_point() + 
+  geom_rect(xmin = -74.20 , xmax = -73.70,   ymin = 40.50, ymax = 40.95,   fill = "red")
+```
+
+The black points above are for the 52 listings with unreasonable coordinates. Their latitude and longitude values will be changed to the median respectively.
+
+```{r}
+lat_median <- median(listings$latitude)
+long_median <- median(listings$longitude)
+
+listings %>% filter(listing_id %in% very_unlikely_geo$listing_id) %>%
+  mutate(latitude = lat_median,
+         longitude = long_median)
+```
+
+Save the "listings" object for use in the next section.
+```{r}
+saveRDS(listings, file = "../data/objects/listings.rds")
+```
+
+

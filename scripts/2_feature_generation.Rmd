@@ -1,0 +1,49 @@
+---
+title: "Feature Generation"
+author: "Lateral Analytics"
+date: "April 26, 2017"
+output: html_document
+---
+
+
+## Remove all objects
+```{r}
+rm(list = ls())
+```
+
+
+## Load libraries
+```{r message = FALSE, warning = FALSE}
+# Clear any previously loaded packages
+pkgs_1 = names(sessionInfo()$otherPkgs)
+pkgs_2 = paste('package:', pkgs_1, sep = "")
+invisible(if (length(pkgs_1) > 0){
+  lapply(pkgs_2, detach, character.only = TRUE, unload = TRUE)
+})
+
+library("tidyverse")
+library("rjson")
+library("rmarkdown")
+library("lubridate")
+library("ggplot2")
+library("maps")
+library("mapproj")
+library("RColorBrewer")
+library("wordcloud")
+```
+
+## Load data
+Load data files from previous .
+```{r}
+
+data <- readRDS(file = "../data/objects/data.rds")
+
+listings <- readRDS(file = "../data/objects/listings.rds")
+
+```
+
+## Create Features
+```{r}
+
+```
+
