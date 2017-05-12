@@ -4,6 +4,13 @@ author: "Lateral Analytics"
 date: "April 26, 2017"
 output: html_document
 ---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+
+## Feature Generation for the Renthop (Two Sigma Connect) Kaggle Competition
+https://www.kaggle.com/c/two-sigma-connect-rental-listing-inquiries
 
 
 ## Remove all objects
@@ -30,6 +37,9 @@ library("maps")
 library("mapproj")
 library("RColorBrewer")
 library("wordcloud")
+library("cluster")
+library("stringr")
+library("htmlwidgets")
 ```
 
 ## Load data
@@ -39,11 +49,310 @@ Load data files from previous .
 data <- readRDS(file = "../data/objects/data.rds")
 
 listings <- readRDS(file = "../data/objects/listings.rds")
+data <- readRDS(file = "../data/objects/data.rds")
+manager_interest_pct <- readRDS(file = "../data/objects/manager_interest_pct.rds")
+building_interest_pct <- readRDS(file = "../data/objects/building_interest_pct.rds")
 
 ```
 
 ## Create Features
+### Price Thresholds
+Any price above $8,000 / month almost certainly can’t be high interest.
+Any price / room above $1,500 / month almost certainly can’t be high interest.
+```{r}
+listings <- listings %>% mutate(
+  price_thresh = ifelse(price <= 8000, 0, 1),
+  price_room_thresh = ifelse(price_room_ratio <= 1500, 0, 1)
+  )
+```
+
+### Popular Property Managers
+Label the the popular property managers.
+```{r}
+manager_list <- manager_interest_pct %>% 
+  select(manager_id) %>%
+  mutate(popular_manager = 1)
+
+listings <- left_join(listings,manager_list) %>%
+  mutate(top_manager = ifelse(popular_manager == 1, 1, 0)) %>%
+  select(-popular_manager)
+```
+### Popular Buildings
+Label the popular buildings
+```{r}
+building_list <- building_interest_pct %>% 
+  select(building_id) %>%
+  mutate(popular_building = 1)
+
+listings <- left_join(listings,building_list) %>%
+  mutate(top_building = ifelse(popular_building == 1, 1, 0)) %>%
+  select(-popular_building)
+```
+### Median Price Delta by Feature Count
+Find the median price by feature count. Then for each price find the distance from the median. 
+```{r}
+feat_price_median <- listings %>%
+  group_by(feature_count) %>%
+  summarize(feat_price_med = median(price))
+
+listings <- left_join(listings,feat_price_median) %>%
+  mutate(feat_price_diff = price - feat_price_med)
+```
+
+### Median Price Delta by Photos Count
+Find the median price by photo count. Then for each price find the distance from the median. 
+```{r}
+photo_price_median <- listings %>%
+  group_by(photos_count) %>%
+  summarize(photos_price_med = median(price))
+
+listings <- left_join(listings,photo_price_median) %>%
+  mutate(photos_price_diff = price - photos_price_med)
+```
+### Median Price Delta by Feature Count / Photos combination
+
+Find the median price by feature / photo count combination. Then for each price find the distance from the median. 
+```{r}
+feat_photo_price_median <- listings %>%
+  group_by(feature_count, photos_count) %>%
+  summarize(feat_photos_price_med = median(price))
+
+listings <- left_join(listings,feat_photo_price_median) %>%
+  mutate(feat_photos_price_diff = price - feat_photos_price_med)
+```
+### Interest Level Probability - Day of Week
+Find the percentage of different listings that are entered at a given day of the week.  What is the relative probability that a listing is in a certain category at a certain DOW?
+
 ```{r}
 
+dow_total <- listings %>%
+  filter(section == 'train') %>%
+  group_by(created_dow) %>%
+  summarize(train_count = n())
+
+dow_proba <- listings %>%
+  filter(section == 'train') %>%
+  group_by(created_dow, interest_level) %>%
+  summarize(interest_count = n())
+
+dow_proba <- inner_join(dow_proba,dow_total) %>%
+  mutate(dow_proba = interest_count / train_count) %>%
+  select(-interest_count, -train_count)
+
+dow_proba <- spread(dow_proba, key = interest_level, value = dow_proba) %>%
+  rename(dow_low_proba = low,
+         dow_medium_proba = medium,
+         dow_high_proba = high)
+
+listings <- inner_join(listings, dow_proba)
+
 ```
+### Interest Level Probability - Hour of Day
+Find the percentage of different listings that are entered at a given hour of the day.  What is the relative probability that a listing is in a certain category at a certain hour of the day?
+
+```{r}
+hod_total <- listings %>%
+  filter(section == 'train') %>%
+  group_by(created_h) %>%
+  summarize(train_count = n())
+
+hod_proba <- listings %>%
+  filter(section == 'train') %>%
+  group_by(created_h, interest_level) %>%
+  summarize(interest_count = n())
+
+hod_proba <- inner_join(hod_proba,hod_total) %>%
+  mutate(hod_proba = interest_count / train_count) %>%
+  select(-interest_count, -train_count)
+
+hod_proba <- spread(hod_proba, key = interest_level, value = hod_proba) %>%
+  rename(hod_low_proba = low,
+         hod_medium_proba = medium,
+         hod_high_proba = high)
+
+listings <- inner_join(listings, hod_proba)
+```
+### Building Clusters
+Cluster groups of buildings together by latitude and longitude. Find the difference between a given price and the cluster median.
+```{r}
+building_count <- listings %>%
+  select(building_id, longitude, latitude) %>%
+  group_by(building_id) %>%
+  summarize(long_med = median(longitude),
+  lat_med = median(latitude))
+
+```
+
+The clustering algorithms take too long to run, so they won't be executed again for report purposes. I'll load the saved files here (out of order). 
+
+```{r}
+agn1 <- readRDS(file = "../data/objects/agn1.rds")
+pam1 <- readRDS(file = "../data/objects/pam1.rds")
+clara1 <- readRDS(file = "../data/objects/clara1.rds")
+```
+
+
+### Agnes algorithm
+```{r, eval=FALSE}
+agn1 <- agnes(building_count[,c(2,3)], metric = "manhattan", stand = TRUE)
+agn1
+plot(agn1)
+```
+
+
+```{r}
+saveRDS(agn1, file = "../data/objects/agn1.rds")
+```
+
+Let's choose 500 groups from the Agnes cluster object and plot them to see what they look like.
+```{r}
+groups <- cutree(agn1,500)
+table(groups)
+```
+
+I like the relatively even distribution forced by choosing 500 as the group number. Inevitably, with a hierarchal method there are some groups that are composed of only one member.
+
+```{r}
+building_count_plot <- cbind(building_count,groups)
+
+building_count_plot %>%
+  filter(groups <= 100) %>%
+ggplot(aes(x=long_med, y=lat_med)) +
+geom_point(aes(color = groups), size = 0.01, alpha = 1.0) + 
+borders("county") +
+coord_map(xlim = c(-74.10, -73.80), ylim = c(40.60, 40.90)) + 
+ggtitle("Buildings Groups (agnes) - Top 100")
+```
+
+The top 100 groups are plotted above. The next 400 were not plotted for visual clarity. Clearly the clustering algorithm made reasonable decisions. However, there are many clusters of only one building. Now that a hierarchal clustering method has shown that a reasonable something less than 500 clusters will give decent groups let's use the Partitioning around Medoids method, and choose 300 different clusters.
+
+### PAM algorithm
+```{r, eval=FALSE}
+
+pam1 <- pam(building_count[,c(2,3)], k = 300, diss = FALSE, metric = "manhattan",
+    medoids = NULL, stand = TRUE, cluster.only = FALSE,
+    do.swap = TRUE,
+    keep.diss = FALSE,
+    keep.data = FALSE,
+    pamonce = FALSE, trace.lev = 1)
+```
+
+The PAM (partitioning around medoids) model ran for two days. Let's save it.
+
+```{r}
+saveRDS(pam1, file = "../data/objects/pam1.rds")
+```
+
+
+
+```{r}
+building_count_plot$groups_pam <- pam1$clustering
+
+building_count_plot %>%
+  filter(groups <= 300) %>%
+ggplot(aes(x=long_med, y=lat_med)) +
+geom_point(aes(color = groups_pam), size = 0.01, alpha = 1.0) + 
+borders("county") +
+coord_map(xlim = c(-74.10, -73.80), ylim = c(40.60, 40.90)) + 
+ggtitle("Buildings Groups (PAM)")
+```
+The above shows all 300 clusters generated by the PAM algorithm. It's a lot easier to read. The following was in the documentation "For large datasets, pam may need too much memory or too much computation time since both are O(n^2). Then, clara() is preferable, see its documentation.", so let's try Clara.
+
+### CLARA algorithm
+```{r, eval=FALSE}
+clara1 <- clara(building_count[,c(2,3)], 300, metric = "manhattan", stand = TRUE, samples = 50,
+      sampsize = 640, trace = 0, medoids.x = TRUE,
+      keep.data = TRUE, rngR = FALSE, pamLike = TRUE, correct.d = TRUE)
+
+```
+
+```{r}
+saveRDS(clara1, file = "../data/objects/clara1.rds")
+```
+
+```{r}
+building_count_plot$groups_clara <- clara1$clustering
+
+building_count_plot %>%
+  filter(groups <= 300) %>%
+ggplot(aes(x=long_med, y=lat_med)) +
+geom_point(aes(color = groups_clara), size = 0.01, alpha = 1.0) + 
+borders("county") +
+coord_map(xlim = c(-74.10, -73.80), ylim = c(40.60, 40.90)) + 
+ggtitle("Buildings Groups (CLARA)")
+```
+
+The above plot shows all 300 clusters calculated by the CLARA algorithm. Instead of two days it only took about 1/2 hour to finish.
+
+### Group Median and Listing Price Differences
+These are geographic based groups, and it's safe to assume that the price of listings in each group should be about the same. Next we'll find the median price for each group and the difference between it and each individual listing. This will be done for all three clustering methods.
+
+```{r}
+building_count_plot <- building_count_plot %>%
+  rename(groups_agnes = groups)
+
+listings <- left_join(listings,building_count_plot)
+```
+
+```{r}
+median_agnes <- listings %>%
+  group_by(groups_agnes) %>%
+  summarize(agnes_med_price = median(price))
+
+median_pam <- listings %>%
+  group_by(groups_pam) %>%
+  summarize(pam_med_price = median(price))
+
+median_clara <- listings %>%
+  group_by(groups_clara) %>%
+  summarize(clara_med_price = median(price))
+
+listings <- left_join(listings,median_agnes)
+listings <- left_join(listings,median_pam)
+listings <- left_join(listings,median_clara)
+
+listings <- listings %>%
+  mutate(agnes_price_diff = price - agnes_med_price,
+         pam_price_diff = price - pam_med_price,
+         clara_price_diff = price - clara_med_price)
+```
+
+### Number of Listings per Building
+Calculate the number of listings per building.
+
+```{r}
+building_listing <- listings %>%
+  group_by(building_id) %>%
+  summarize(listing_per_building = n())
+
+listings <- left_join(listings,building_listing)
+```
+
+### Doorman
+Find the presence of "Doorman" in the description field. This is because it has a negative relationship with interest level. Doorman must mean that the listing is expensive.
+
+```{r}
+dman <- as_tibble(str_extract(listings$description,"(D|d)oorman")) %>%
+  mutate(doorman = ifelse(is.na(value) == TRUE, 0, 1)) %>%
+  select(-value)
+
+listings <- cbind(listings,dman)
+
+```
+
+```{r}
+saveRDS(listings, file = "../data/objects/listings_2.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
 
