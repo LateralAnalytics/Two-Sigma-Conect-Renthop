@@ -1,0 +1,97 @@
+---
+title: "Feature Generation - Syuzhet"
+author: "Lateral Analytics"
+date: "May 16, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+## Feature Generation for the Renthop (Two Sigma Connect) Kaggle Competition
+https://www.kaggle.com/c/two-sigma-connect-rental-listing-inquiries
+
+
+## Remove all objects
+```{r}
+rm(list = ls())
+```
+
+
+## Load libraries
+```{r message = FALSE, warning = FALSE}
+# Clear any previously loaded packages
+pkgs_1 = names(sessionInfo()$otherPkgs)
+pkgs_2 = paste('package:', pkgs_1, sep = "")
+invisible(if (length(pkgs_1) > 0){
+  lapply(pkgs_2, detach, character.only = TRUE, unload = TRUE)
+})
+
+library("tidyverse")
+library("rjson")
+library("rmarkdown")
+library("lubridate")
+library("ggplot2")
+library("maps")
+library("mapproj")
+library("RColorBrewer")
+library("wordcloud")
+library("cluster")
+library("stringr")
+library("htmlwidgets")
+## How to install rjava in preparation for syuzhet
+## https://stackoverflow.com/questions/30572258/error-of-java-path-on-loading-rjava-package
+library("syuzhet")
+```
+
+
+## Load data
+Load data files from previous .
+```{r}
+data <- readRDS(file = "../data/objects/data.rds")
+listings_2 <- readRDS(file = "../data/objects/listings_2.rds")
+
+```
+## Move listing_id to the first column
+```{r}
+listings_2 <- listings_2 %>%
+  select(listing_id,everything())
+```
+
+## Calculate new features using the syuzhet package
+Get the raw sentiment of the description column
+```{r}
+sentiment_raw <- get_sentiment(listings_2$description, method = "syuzhet")
+
+```
+
+```{r}
+sentiment_raw_temp <- as.data.frame(sentiment_raw)
+listings_2$sentiment_raw <- sentiment_raw
+```
+
+```{r}
+head(sentiment_raw)
+```
+
+
+Get the sentiment for different emotions
+```{r}
+sentiment <- get_nrc_sentiment(listings_2$description)
+```
+
+```{r}
+listings_2 <- cbind(listings_2,sentiment)
+```
+
+```{r}
+head(sentiment)
+```
+
+
+```{r}
+saveRDS(listings_2, file = "../data/objects/listings_3.rds")
+```
+
+

@@ -1,0 +1,11 @@
+
+\.RData
+
+\.Rhistory
+.Rproj.user
+
+cache/
+
+data/
+
+scripts/2_feature_generation_cache/
