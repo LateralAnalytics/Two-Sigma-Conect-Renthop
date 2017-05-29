@@ -556,6 +556,10 @@ listings %>% filter(listing_id %in% very_unlikely_geo$listing_id) %>%
 Save the "listings" object for use in the next section.
 ```{r}
 saveRDS(listings, file = "../data/objects/listings.rds")
+saveRDS(manager_interest_pct, file = "../data/objects/manager_interest_pct.rds")
+saveRDS(building_interest_pct, file = "../data/objects/building_interest_pct.rds")
+
+building_interest_pct
 ```
 
 

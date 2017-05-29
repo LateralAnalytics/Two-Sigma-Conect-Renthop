@@ -9,3 +9,11 @@ cache/
 data/
 
 scripts/2_feature_generation_cache/
+
+Notes/
+
+scripts/3_feature_generation_syuzhet_cache/
+
+scripts/4_data_preprocessing_cache/
+
+scripts/4_data_preprocessing_files/

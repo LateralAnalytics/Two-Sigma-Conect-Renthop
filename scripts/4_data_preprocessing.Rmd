@@ -1,0 +1,187 @@
+---
+title: "Data Preprocessing"
+author: "Lateral Analytics"
+date: "May 26, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+## Data preprocessing for the Renthop (Two Sigma Connect) Kaggle Competition
+https://www.kaggle.com/c/two-sigma-connect-rental-listing-inquiries
+
+
+## Remove all objects
+```{r}
+rm(list = ls())
+```
+
+
+## Load libraries
+```{r message = FALSE, warning = FALSE}
+# Clear any previously loaded packages
+pkgs_1 = names(sessionInfo()$otherPkgs)
+pkgs_2 = paste('package:', pkgs_1, sep = "")
+invisible(if (length(pkgs_1) > 0){
+  lapply(pkgs_2, detach, character.only = TRUE, unload = TRUE)
+})
+
+library("tidyverse")
+library("rjson")
+library("rmarkdown")
+library("lubridate")
+library("ggplot2")
+library("maps")
+library("mapproj")
+library("RColorBrewer")
+library("wordcloud")
+library("cluster")
+library("stringr")
+library("htmlwidgets")
+## How to install rjava in preparation for syuzhet
+## https://stackoverflow.com/questions/30572258/error-of-java-path-on-loading-rjava-package
+library("syuzhet")
+library("caret")
+library("corrplot")
+library("RANN")
+```
+
+
+## Load data
+Load data files from previous .
+```{r}
+data <- readRDS(file = "../data/objects/data.rds")
+listings_3 <- readRDS(file = "../data/objects/listings_3.rds")
+```
+
+## Prepare the data for modeling
+### View listings in its current form
+```{r}
+str(listings_3)
+```
+### Replace NA values in "top_building" and "top_manager" with zero
+```{r}
+listings_3 <- listings_3 %>%
+  mutate(top_manager = replace(top_manager, is.na(top_manager), 0),
+         top_building = replace(top_building, is.na(top_building), 0))
+```
+
+### Remove fields that were used to create features, but can't be directly modeled themselves
+```{r}
+listings_3 <- listings_3 %>%
+  select(-description,
+         -display_address,
+         -street_address,
+         -created,
+         -dates_formatted,
+         -created_ymd,
+         -building_id,
+         -manager_id)
+```
+
+listing_id is a label and should be removed
+```{r}
+listings_3 <- listings_3 %>%
+  select(-listing_id)
+```
+
+
+
+
+
+
+### Reorder fields in preparation for modeling
+```{r}
+# Convert all categorical variables to factors
+listings_3 <- listings_3 %>%
+  mutate(section = factor(section),
+  groups_agnes = factor(groups_agnes),
+  groups_pam = factor(groups_pam),
+  groups_clara = factor(groups_clara),
+  created_dow = factor(created_dow),
+  price_thresh = factor(price_thresh),
+  price_room_thresh = factor(price_room_thresh),
+  top_manager = factor(top_manager),
+  top_building = factor(top_building),
+  doorman = factor(doorman)
+  )
+
+# Order the fields by class
+listings_3 <- listings_3 %>%
+  select(order(sapply(listings_3,class)))
+
+# Place the interest level, and section at the beginning
+listings_3 <- listings_3 %>%
+  select(interest_level, section, everything())
+```
+
+### Preprocess the data with the Caret preProcess function
+
+View how the features are correlated with each other to better understand the data.
+
+```{r}
+correlations <- cor(listings_3[listings_3$section == "train",-c(1:11)])
+# Replace NA values with 0 so the corrplot function will work
+correlations[is.na(correlations)] <- 0
+
+corrplot(correlations, order = "hclust", type = c("lower"), tl.cex=0.7, diag = FALSE)
+
+
+```
+
+A large cluster of positively correlated features is centered around various price difference measurements. This is intuitive. If an individual listing is particularly high or low it should have a large difference with a measure of median price. This should hold true for many different measures.
+
+A second cluster of positively correlated features is found centered around the N.L.P. features. It also makes sense. Positive emotions are positively correlated with other positive emotions. The same relationship is found between various negative emotions.
+
+There is a negatively correlated cluster that centers predominantly around the probability of being in one of the three interest levels. Obviously if the probability of one of them is high then the remaining two would need to be lower.
+
+
+### Remove features that are highly correlated
+The preProcess function from the caret package has a method called "corr". It is supposed to filter out features with show a high correlation. For whatever reason when I used it in the next section an error occurred. After highly correlated features were removed the next method didn't realize they had been removed. It tried to perform an operation on features which were no longer available.
+
+For this reason, highly correlated features are identified and removed first before preProcess is called.
+```{r}
+high_corr <- findCorrelation(correlations, cutoff = 0.90)
+high_corr_names <- colnames(correlations[,high_corr])
+
+remaining_names <- names(listings_3)[!(names(listings_3) %in% high_corr_names)]
+listings_3 <- listings_3[, remaining_names]
+
+
+```
+
+
+
+
+### Use preProcess from the caret package to remove zero variance features, transform, center, scale, and "examines the distribution of each predictor conditional on the outcome".
+```{r}
+train_trans_data <- listings_3[listings_3$section == "train",-c(1,2)]
+train_trans_outcome <- listings_3[listings_3$section == "train",1]
+
+trans <- preProcess(train_trans_data,
+                    method = c("YeoJohnson", "center", "scale", "knnImpute", "zv", "conditionalX"),
+                    na.remove = TRUE, k = 5,
+                    knnSummary = mean, outcome = train_trans_outcome,
+                    verbose = TRUE,
+                    cutoff = 0.90)
+```
+
+Use the predict function to adjust listings_3 according to the calculations above. In a production environment this process would be used to adjust a new test set.
+```{r}
+
+listings_3_trans <- predict(trans, listings_3[,-c(1,2)])
+listings_3_trans <- cbind(listings_3[,c(1,2)],listings_3_trans)
+
+```
+
+
+
+```{r}
+saveRDS(listings_3, file = "../data/objects/listings_4.rds")
+saveRDS(listings_3_trans, file = "../data/objects/listings_4_trans.rds")
+```
+
+
+
