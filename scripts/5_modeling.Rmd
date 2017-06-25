@@ -1,0 +1,591 @@
+---
+title: "Modeling - Renthop Data"
+author: "Lateral Analytics"
+date: "May 29, 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r global_options}
+knitr::opts_chunk$set(cache=TRUE, warning=FALSE, message=FALSE, fig.path='../figure/')
+```
+
+
+## Data modeling for the Renthop (Two Sigma Connect) Kaggle Competition
+https://www.kaggle.com/c/two-sigma-connect-rental-listing-inquiries
+
+
+## Remove all objects
+```{r}
+rm(list = ls())
+```
+
+
+## Load libraries
+```{r message = FALSE, warning = FALSE}
+# Clear any previously loaded packages
+pkgs_1 = names(sessionInfo()$otherPkgs)
+pkgs_2 = paste('package:', pkgs_1, sep = "")
+invisible(if (length(pkgs_1) > 0){
+  lapply(pkgs_2, detach, character.only = TRUE, unload = TRUE)
+})
+library("plyr")
+library("tidyverse")
+library("rjson")
+library("rmarkdown")
+library("lubridate")
+library("ggplot2")
+library("maps")
+library("mapproj")
+library("RColorBrewer")
+library("wordcloud")
+library("cluster")
+library("stringr")
+library("htmlwidgets")
+## How to install rjava in preparation for syuzhet
+## https://stackoverflow.com/questions/30572258/error-of-java-path-on-loading-rjava-package
+library("syuzhet")
+library("caret")
+library("corrplot")
+library("RANN")
+library("MLmetrics")
+library("doMC")
+registerDoMC(cores = 1)
+library("Boruta")
+library("magrittr")
+library("Matrix")
+library("xgboost")
+```
+
+
+## Load data
+Load data files from previous .
+```{r}
+listings_4_trans <- readRDS(file = "../data/objects/listings_4_trans.rds")
+```
+
+
+
+## Investigate variable importance
+```{r}
+train_data <- listings_4_trans %>%
+  filter(section == "train") %>%
+  dplyr::select(-section,
+         -listing_id)
+
+test_data <- listings_4_trans %>%
+  filter(section == "test") %>%
+  dplyr::select(-interest_level,
+         -section,
+         -listing_id)
+
+# For use with final submission
+test_data_listing_id <- listings_4_trans %>%
+  filter(section == "test") %>%
+  dplyr::select(listing_id)
+
+roc_values <- filterVarImp(x = train_data[,-c(1,2,3)],
+                          y = train_data$interest_level)
+
+roc_values <- as_tibble(rownames_to_column(roc_values)) 
+
+roc_values$roc_avg = rowMeans(roc_values[,c(2:4)])
+
+roc_values <- roc_values %>%
+  arrange(-roc_avg)
+
+print(roc_values)
+```
+
+The highest AUC is 0.643 and is for hod_high_proba, which is the probability that a certain hour of day the listing was created will have a high interest level. This is followed by created_h (the hour of day a listing was created), and then the three geographical clustering methods. There are  a fair number of features, which have an AUC below 0.5, which is problematic. This isn't actually a two class problem, so this may have something to do with approximations. 
+
+### Run a simple Random Forest algorithm to see what variable importance values it produces.
+
+
+```{r}
+
+
+MultiLogLoss_summary <- function (data,
+  lev = NULL,
+  model = NULL) {
+  out <- ModelMetrics::mlogLoss(data$obs, data[,c(3,4,5)])
+  names(out) <- "MultiLogLoss"
+  out
+}
+
+
+# prepare resampling method
+cv_index <- createFolds(factor(train_data[,1]), 3, returnTrain = T)
+
+ctrl <- trainControl(index = cv_index,
+                     method="repeatedcv", 
+                     number=3,
+                     repeats = 1,
+                     classProbs=TRUE, 
+                     summaryFunction=MultiLogLoss_summary,
+                     selectionFunction = "best",
+                     allowParallel = TRUE,
+                     verbose = FALSE,
+                     sampling = "up",
+                     savePredictions = 'final')
+ 
+ranger_grid = expand.grid(mtry=seq(1.0, 10.0, 0.5))
+                   
+set.seed(8)
+fit_init <- train(y = train_data[,1], 
+             x = train_data[,-1], 
+             method="ranger", 
+             metric="MultiLogLoss",
+             maximize = FALSE,
+             trControl=ctrl, 
+             importance = "impurity",
+             tuneGrid=ranger_grid)
+# display results
+print(fit_init)
+```
+When all of the remaining features are used the lowest multiclass logLoss is 0.6297.
+
+Those features most important within the model are below.
+
+```{r}
+varImp(fit_init)
+```
+
+### Run a Random Forest (Ranger) algorithm on just those features that had a ROC value greater than 0.5.
+
+
+
+```{r}
+roc_values_keep <- roc_values %>%
+  filter(roc_avg > 0.5) %>%
+  select(rowname)
+
+roc_values_keep <- as.vector(roc_values_keep$rowname)
+
+
+
+
+ctrl <- trainControl(index = cv_index,
+                     method="repeatedcv", 
+                     number=3,
+                     repeats = 1,
+                     classProbs=TRUE, 
+                     summaryFunction=MultiLogLoss_summary,
+                     selectionFunction = "best",
+                     allowParallel = TRUE,
+                     verbose = FALSE,
+                     sampling = "up",
+                     savePredictions = 'final')
+ 
+ranger_grid = expand.grid(mtry=seq(1.0, 5.0, 0.2))
+                   
+set.seed(8)
+fit_roc <- train(y = train_data[,1], 
+             x = train_data[,roc_values_keep], 
+             method="ranger", 
+             metric="MultiLogLoss",
+             maximize = FALSE,
+             trControl=ctrl, 
+             importance = "impurity",
+             tuneGrid=ranger_grid)
+# display results
+print(fit_roc)
+```
+
+The lowest Multiclass LogLoss was 0.7044, which isn't as good as 0.6297.
+
+### Add some of the top features (variable importance > 50) based on variable importance in the ranger function with those that had and AUC > 0.5.
+
+```{r}
+varImp_keep <- varImp(fit_init)$importance %>%
+  rownames_to_column(var = "rowname") %>%
+  filter(Overall > 50)
+
+roc_varImp_keep <- union(roc_values_keep,as.vector(varImp_keep$rowname))
+
+
+
+
+```
+
+```{r}
+
+
+ctrl <- trainControl(index = cv_index,
+                     method="repeatedcv", 
+                     number=3,
+                     repeats = 1,
+                     classProbs=TRUE, 
+                     summaryFunction=MultiLogLoss_summary,
+                     selectionFunction = "best",
+                     allowParallel = TRUE,
+                     verbose = FALSE,
+                     sampling = "up",
+                     savePredictions = 'final')
+ 
+ranger_grid = expand.grid(mtry=seq(1.0, 5.0, 0.2))
+                   
+set.seed(8)
+fit_roc_varImp <- train(y = train_data[,1], 
+             x = train_data[,roc_varImp_keep], 
+             method="ranger", 
+             metric="MultiLogLoss",
+             maximize = FALSE,
+             trControl=ctrl, 
+             importance = "impurity",
+             tuneGrid=ranger_grid)
+# display results
+print(fit_roc_varImp)
+
+```
+
+This is not an improvement, yet is fairly close. The best resutls here was 0.636 and when all features are used, it was 0.6297.
+
+
+
+
+### Look for features with the Boruta package
+```{r}
+
+boruta_train <- Boruta(y = train_data[,1], x = train_data[,-1], doTrace = 0)
+
+
+```
+
+```{r}
+plot(boruta_train)
+```
+
+The Boruta package says that everything is important. This isn't useful. I'll just use all features remaining at this point. This produces the best results and the algorithm doesn't take too long to run.
+
+Save the model for that run for later use.
+```{r}
+saveRDS(fit_init, file = "../data/objects/fit_init.rds")
+```
+
+
+## Modify data for use in xgBoost
+
+```{r}
+# Convert factor to integers
+
+factor_cols <- c("created_dow", "price_thresh", "price_room_thresh", "top_manager", "top_building", "groups_agnes", "groups_pam", "groups_clara", "doorman")
+
+train_data[,factor_cols] %<>% lapply(function(x) as.integer(x))
+
+train_data_numeric <- train_data
+
+
+test_data[,factor_cols] %<>% lapply(function(x) as.integer(x))
+
+test_data_numeric <- test_data
+
+
+
+# Treat interest_level separately to make sure the levels align to high, medium, and low properly.
+train_data_numeric <- train_data_numeric %>%
+  mutate(interest_level = as.integer(interest_level))
+
+
+
+t1_sparse <- Matrix(as.matrix(train_data_numeric), sparse=TRUE)
+labels <- as.numeric(train_data_numeric$interest_level-1)
+#table(labels)
+
+dtrain <- xgb.DMatrix(data=t1_sparse, label=labels)
+
+```
+
+## Initial xgBoost run
+
+```{r}
+
+
+
+param <- list(booster="gbtree",
+              objective="multi:softprob",
+              eval_metric="mlogloss",
+              nthread=13,
+              num_class=3,
+              eta = .02,
+              gamma = 1,
+              max_depth = 4,
+              min_child_weight = 1,
+              subsample = .7,
+              colsample_bytree = .5
+)
+
+
+xgb2 <- xgb.train(data = dtrain,
+                  params = param,
+                 # watchlist=watch,
+                  # nrounds = xgb2cv$best_ntreelimit
+                  nrounds = 2000
+)
+```
+
+
+
+
+## Use xgBoost with it's own cross validation function.
+
+```{r}
+
+xgb.grid <- expand.grid(nrounds = 500, #the maximum number of iterations
+                        eta = c(0.01,0.1), # shrinkage
+                        max_depth = c(2,6,10))
+
+param <- list(booster="gbtree",
+              objective="multi:softprob",
+              eval_metric="mlogloss",
+              nthread=13,
+              num_class=3,
+              eta = c(0.01,0.1),
+              gamma = 1,
+              max_depth = c(2,6,10),
+              min_child_weight = 1,
+              subsample = .7,
+              colsample_bytree = .5
+)
+
+xgb2_cv <- xgb.cv(data = dtrain,
+                  params = param,
+                  nfold = 3,
+                  showsd = TRUE,
+                  stratified = TRUE,
+                  nrounds = 3000,
+                  verbose = FALSE,
+                  early_stopping_rounds = TRUE)
+
+```
+
+## Use xgBoost with Caret for it's grid search capabilities
+
+```{r message = FALSE, warning = FALSE}
+
+labels_xgBoost_caret <- make.names(labels)
+
+MultiLogLoss_summary_xgBoost <- function (data,
+  lev = NULL,
+  model = NULL) {
+  out <- ModelMetrics::mlogLoss(data$obs, data[,c(3,4,5)])
+  names(out) <- "MultiLogLoss"
+  out
+}
+
+
+# set up the cross-validated hyper-parameter search
+xgb_grid_1 = expand.grid(
+  nrounds = c(50, 100, 150),
+  max_depth = c(1, 2, 3, 4),
+  eta = c(0.1, 0.01, 0.001),
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = 1,
+  subsample = c(0.25, 0.5, 0.75, 1.00)
+)
+
+# pack the training control parameters
+xgb_trcontrol_1 = trainControl(
+  method = "cv",
+  number = 3,
+  verboseIter = FALSE,
+  returnData = FALSE,
+  returnResamp = "all",                                                        
+  classProbs = TRUE,                                                           
+  summaryFunction=MultiLogLoss_summary_xgBoost,
+  allowParallel = TRUE,
+  savePredictions = 'final'
+)
+
+
+# train the model for each parameter combination in the grid, 
+#   using CV to evaluate
+fit_xgb_train_1 = train(
+  x = as.matrix(train_data_numeric[,-1]),
+  y = labels_xgBoost_caret,
+  trControl = xgb_trcontrol_1,
+  tuneGrid = xgb_grid_1,
+  method = "xgbTree",
+  maximize = FALSE
+)
+```
+
+Save xgb_train_1
+```{r}
+
+saveRDS(fit_xgb_train_1, file = "../data/objects/fit_xgb_train_1.rds")
+
+```
+
+
+```{r}
+plot(fit_xgb_train_1)
+```
+
+A higher value of eta is valuable as well as a lower value of max depth. The final model selected was for nrounds = 50, max_depth = 1, eta = 0.1, gamma = 0, colsample_bytree = 0.4, min_child_weight = 1 and subsample = 0.5.
+
+
+```{r}
+fit_xgb_train_1$results %>% arrange(MultiLogLoss)
+```
+
+This brings a multiLogLoss value of 0.2072540, which is much smaller than that from the ranger algorithm. The highest score on the Kaggle leaderboard is 0.49194, so I don't believe this number. Perhaps I need to make some changes with the metric or the cross-validation settings? Nevertheless, it still has predictive power. Let's move on.
+
+
+## Use a GBM model on this data.
+```{r}
+
+MultiLogLoss_summary_GBM <- function (data,
+  lev = NULL,
+  model = NULL) {
+  out <- ModelMetrics::mlogLoss(data$obs, data[,c(3,4,5)])
+  names(out) <- "MultiLogLoss"
+  out
+}
+
+
+
+
+# pack the training control parameters
+GBM_trcontrol_1 = trainControl(
+  method = "cv",
+  number = 3,
+  verboseIter = FALSE,
+  returnData = FALSE,
+  returnResamp = "all",                                                        
+  classProbs = TRUE,                                                           
+  summaryFunction=MultiLogLoss_summary_GBM,
+  allowParallel = TRUE,
+  savePredictions = 'final'
+)
+
+
+# train the model for each parameter combination in the grid, 
+#   using CV to evaluate
+fit_GBM_train_1 = train(
+  x = train_data[,-1],
+  y = train_data[,1],
+  trControl = GBM_trcontrol_1,
+  method = "gbm",
+  maximize = FALSE
+)
+
+
+```
+
+```{r}
+plot(fit_GBM_train_1)
+```
+
+```{r}
+fit_GBM_train_1$results %>% arrange(MultiLogLoss)
+```
+
+The lowest value of multiLogLoss for the GBM algorithm was 0.2118509, which is slightly higher than the 0.207 from xgBoost.
+
+
+```{r}
+saveRDS(fit_GBM_train_1, file = "../data/objects/fit_GBM_train_1.rds")
+
+```
+
+
+## Stacking
+
+
+```{r}
+fit_init <- readRDS(file = "../data/objects/fit_init.rds")
+fit_xgb_train_1 <- readRDS(file = "../data/objects/fit_xgb_train_1.rds")
+fit_GBM_train_1 <- readRDS(file = "../data/objects/fit_GBM_train_1.rds")
+
+```
+
+
+```{r}
+#Predict the out of fold prediction probabilities for the training data
+
+OOF_pred_rf_train <- fit_init$pred %>% arrange(rowIndex) %>% select(low, medium, high) %>% rename(low_rf = low, medium_rf = medium, high_rf = high)
+OOF_pred_xgb_train <- fit_xgb_train_1$pred %>% arrange(rowIndex) %>% select(X0, X1, X2) %>% rename(low_xgb = X0, medium_xgb = X1, high_xgb = X2)
+OOF_pred_GBM_train <- fit_GBM_train_1$pred %>% arrange(rowIndex) %>% select(low, medium, high) %>% rename(low_GBM = low, medium_GBM = medium, high_GBM = high)
+train_set <- as_tibble(c(data.frame(train_data$interest_level), OOF_pred_rf_train, OOF_pred_xgb_train, OOF_pred_GBM_train))
+train_set <- train_set %>% rename(interest_level = train_data.interest_level)
+
+
+
+
+# Predict the prediction probabilities for the test data.
+
+OOF_pred_rf_test <- predict(fit_init,test_data,type='prob') %>% select(low, medium, high) %>% rename(low_rf = low, medium_rf = medium, high_rf = high)
+OOF_pred_xgb_test <- predict(fit_xgb_train_1,test_data_numeric,type='prob') %>% select(X0, X1, X2) %>% rename(low_xgb = X0, medium_xgb = X1, high_xgb = X2)
+OOF_pred_GBM_test <- predict(fit_GBM_train_1,test_data_numeric,type='prob') %>% select(low, medium, high) %>% rename(low_GBM = low, medium_GBM = medium, high_GBM = high)
+test_set <- as_tibble(c(OOF_pred_rf_test, OOF_pred_xgb_test, OOF_pred_GBM_test))
+
+```
+
+### Run a model on top of the three initial model predictions
+```{r message = FALSE, warning = FALSE}
+
+#labels_nn <- make.names(train_set$interest_level)
+labels_nn <- make.names(as.numeric(train_set$interest_level)-1)
+
+MultiLogLoss_summary_nn <- function (data,
+  lev = NULL,
+  model = NULL) {
+  out <- ModelMetrics::mlogLoss(data$obs, data[,c(3,4,5)])
+  names(out) <- "MultiLogLoss"
+  out
+}
+
+# pack the training control parameters
+nn_trcontrol_1 = trainControl(
+  method = "cv",
+  number = 3,
+  verboseIter = TRUE,
+  returnData = FALSE,
+  returnResamp = "all",                                                        
+  classProbs = TRUE,                                                           
+  summaryFunction=MultiLogLoss_summary_nn,
+  allowParallel = TRUE,
+  savePredictions = 'final'
+)
+
+# Use CV to evaluate
+fit_nn_train_1 = train(
+  y = labels_nn, 
+  x = train_set[,-1],
+  trControl = nn_trcontrol_1,
+  method = "avNNet",
+  maximize = FALSE
+)
+```
+
+
+```{r}
+saveRDS(fit_nn_train_1, file = "../data/objects/fit_nn_train_1.rds")
+
+```
+
+```{r}
+plot(fit_nn_train_1)
+```
+
+
+The lowest multiLogLoss value was 0.5883, which was consistent with the results on the Kaggle leaderboard.
+
+## Prepare submission for Kaggle
+```{r}
+
+pred_nn_final <- predict(fit_nn_train_1,test_set,type='prob') %>% rename(low = X0, medium = X1, high = X2) %>%
+  select(high, medium, low)
+
+renthop_submission <- as_tibble(c(test_data_listing_id, pred_nn_final))
+
+write.csv(renthop_submission, file = "../submissions/renthop_submission.csv", row.names=FALSE)
+write.csv(renthop_submission, file=gzfile("../submissions/renthop_submission.csv.gz"), row.names=FALSE)
+
+```
+
+The final score on the Kaggle test set was 0.58922.
+

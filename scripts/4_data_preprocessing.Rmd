@@ -81,11 +81,6 @@ listings_3 <- listings_3 %>%
          -manager_id)
 ```
 
-listing_id is a label and should be removed
-```{r}
-listings_3 <- listings_3 %>%
-  select(-listing_id)
-```
 
 
 
@@ -114,7 +109,7 @@ listings_3 <- listings_3 %>%
 
 # Place the interest level, and section at the beginning
 listings_3 <- listings_3 %>%
-  select(interest_level, section, everything())
+  select(interest_level, section, listing_id, everything())
 ```
 
 ### Preprocess the data with the Caret preProcess function
@@ -122,7 +117,7 @@ listings_3 <- listings_3 %>%
 View how the features are correlated with each other to better understand the data.
 
 ```{r}
-correlations <- cor(listings_3[listings_3$section == "train",-c(1:11)])
+correlations <- cor(listings_3[listings_3$section == "train",-c(1:12)])
 # Replace NA values with 0 so the corrplot function will work
 correlations[is.na(correlations)] <- 0
 
@@ -157,7 +152,7 @@ listings_3 <- listings_3[, remaining_names]
 
 ### Use preProcess from the caret package to remove zero variance features, transform, center, scale, and "examines the distribution of each predictor conditional on the outcome".
 ```{r}
-train_trans_data <- listings_3[listings_3$section == "train",-c(1,2)]
+train_trans_data <- listings_3[listings_3$section == "train",-c(1,2,3)]
 train_trans_outcome <- listings_3[listings_3$section == "train",1]
 
 trans <- preProcess(train_trans_data,
@@ -171,8 +166,8 @@ trans <- preProcess(train_trans_data,
 Use the predict function to adjust listings_3 according to the calculations above. In a production environment this process would be used to adjust a new test set.
 ```{r}
 
-listings_3_trans <- predict(trans, listings_3[,-c(1,2)])
-listings_3_trans <- cbind(listings_3[,c(1,2)],listings_3_trans)
+listings_3_trans <- predict(trans, listings_3[,-c(1,2,3)])
+listings_3_trans <- cbind(listings_3[,c(1,2,3)],listings_3_trans)
 
 ```
 
